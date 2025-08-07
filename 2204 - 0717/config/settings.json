@@ -1,0 +1,11 @@
+{
+    "python.analysis.diagnosticSeverityOverrides": {   
+    },
+    "python.defaultInterpreterPath": "/opt/miniconda3/bin/python",
+    "files.exclude": {
+        "**/.*": true
+    },
+    "files.associations": {
+        "*.py": "python"
+    }
+}

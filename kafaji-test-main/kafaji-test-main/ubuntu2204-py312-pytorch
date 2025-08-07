@@ -1,0 +1,165 @@
+FROM ubuntu:22.04
+
+# 更换 apt 源为国内镜像(http)以解决证书问题
+RUN sed -i 's@http://.*.ubuntu.com@http://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+
+# 设置 DEBIAN_FRONTEND 为非交互模式，避免 apt-get 在构建时卡住
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装 CUDA 安装所需的依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gnupg2 \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 CUDA Toolkit 11.8
+RUN wget --tries=3 --timeout=60 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb && \
+    dpkg -i cuda-keyring_1.0-1_all.deb && \
+    apt-get update && \
+    apt-get -y install cuda-toolkit-11-8 && \
+    rm cuda-keyring_1.0-1_all.deb && \
+    rm -rf /var/lib/apt/lists/*
+
+# 设置 CUDA 环境变量
+ENV PATH=/usr/local/cuda-11.8/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:${LD_LIBRARY_PATH}
+
+# 安装并配置 Miniconda
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/miniconda3 && \
+    rm Miniconda3-latest-Linux-x86_64.sh && \
+    echo "PATH=/opt/miniconda3/bin:\$PATH" >> /etc/profile && \
+    /opt/miniconda3/bin/conda init bash && \
+    /opt/miniconda3/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/ && \
+    /opt/miniconda3/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/ && \
+    /opt/miniconda3/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/ && \
+    /opt/miniconda3/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/msys2/ && \
+    /opt/miniconda3/bin/conda config --set show_channel_urls yes
+
+# 配置 pip 清华源
+RUN mkdir -p /root/.pip && \
+    printf "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple\ntrusted-host = pypi.tuna.tsinghua.edu.cn\n" > /root/.pip/pip.conf
+
+# 将 base 环境的 Python 升级为 3.12
+RUN /opt/miniconda3/bin/conda install -y python=3.12
+
+# 安装 Node.js（JupyterLab 插件构建用）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# 安装 JupyterLab 4.4.4 到 base 环境
+RUN /opt/miniconda3/bin/conda install -y jupyterlab=4.4.4
+
+# 安装 pip 依赖（后端）
+RUN /opt/miniconda3/bin/pip install \
+    jupyterlab-lsp \
+    python-lsp-server[all] \
+    ipympl \
+    jupyterlab-katex \
+    ipykernel
+
+# 安装 JupyterLab 插件（前端）
+RUN /opt/miniconda3/bin/jupyter labextension install \
+    @jupyterlab/toc \
+    @jupyterlab/katex-extension \
+    jupyter-matplotlib \
+    @jupyterlab/debugger \
+    @jupyterlab/lsp-extension && \
+    /opt/miniconda3/bin/jupyter lab build
+
+# 安装 LaTeX 支持
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    texlive-xetex \
+    texlive-fonts-recommended \
+    texlive-latex-recommended \
+    texlive-latex-extra \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 PyTorch 2.7.1 到 base 环境（pip）
+RUN /opt/miniconda3/bin/pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu121
+
+# 安装 screen
+RUN apt-get update && apt-get install -y screen && rm -rf /var/lib/apt/lists/*
+
+# 安装 code-server（VSCode Server）- 使用更可靠的安装方式
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL https://code-server.dev/install.sh | sh && \
+    # 如果官方安装失败，尝试备用方案
+    (which code-server || (wget -O /tmp/code-server.deb https://github.com/coder/code-server/releases/download/v4.19.1/code-server_4.19.1_amd64.deb && \
+     dpkg -i /tmp/code-server.deb && \
+     rm /tmp/code-server.deb)) && \
+    # 确保code-server可执行（code-server安装在/usr/bin/）
+    chmod +x /usr/bin/code-server && \
+    rm -rf /var/lib/apt/lists/*
+
+# 安装VSCode扩展（在构建阶段完成，避免运行时阻塞）
+RUN code-server --install-extension ms-python.python || true
+RUN code-server --install-extension ms-toolsai.jupyter || true
+RUN code-server --install-extension ms-python.pylance || true
+RUN code-server --install-extension ms-python.debugpy || true
+
+# 配置 bashrc（root/ubuntu）自动激活 conda 环境
+RUN echo "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate base" >> /root/.bashrc && \
+    echo "conda activate base" >> /root/.bashrc
+
+# 配置 JupyterLab 默认 shell 为 bash
+RUN mkdir -p /root/.jupyter && \
+    echo "c.NotebookApp.terminado_settings = {'shell_command': ['/bin/bash']}" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.terminado_settings = {'shell_command': ['/bin/bash']}" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.root_dir = '/workspace'" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.allow_origin = '*'" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.ip = '0.0.0.0'" >> /root/.jupyter/jupyter_notebook_config.py
+
+# pip/conda 换源对所有用户生效
+RUN mkdir -p /etc/skel/.pip && cp /root/.pip/pip.conf /etc/skel/.pip/pip.conf
+
+# 将构建上下文复制到镜像中，以规避潜在的文件系统问题
+WORKDIR /app
+COPY . .
+
+# 从镜像内部复制配置文件和脚本
+RUN mkdir -p /init && \
+    cp -r /app/config/supervisord.conf /etc/supervisord.conf && \
+    cp -r /app/init/init.sh /init/init.sh && \
+    cp -r /app/config/settings.json /tmp/settings.json && \
+    chmod +x /init/init.sh
+
+# 清理并返回根目录
+RUN rm -rf /app
+WORKDIR /
+
+# 安装 supervisor 和 openssh-server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    supervisor \
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# 配置 SSH
+RUN mkdir -p /var/run/sshd && \
+    echo 'root:123456' | chpasswd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# 创建 supervisord 日志目录和工作目录
+RUN mkdir -p /var/log/supervisor /var/run /workspace && \
+    chmod 755 /workspace
+
+# 设置环境变量
+ARG SSH_PASSWORD=123456
+ARG SSH_USER=ubuntu
+ENV SSH_PASSWORD=${SSH_PASSWORD} \
+    SSH_USER=${SSH_USER} \
+    CODE_SERVER_PASSWORD=${SSH_PASSWORD} \
+    JUPYTER_PASSWORD=${SSH_PASSWORD} \
+    PATH=/usr/local/cuda-11.8/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH
+
+# 暴露端口
+EXPOSE 22 62661 8888
+
+# 启动命令
+CMD ["/init/init.sh"] 
